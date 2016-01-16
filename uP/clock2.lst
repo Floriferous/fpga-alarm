@@ -1,0 +1,1459 @@
+
+AVRASM ver. 1.56  C:\temp\uP\clock2.asm Tue May 29 19:58:18 2012
+
+
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+warning : Register already defined by the .DEF directive
+         ; file	clock.asm
+         ; Florian Bienefelt; Beat Geissmann
+         ; 2012-05-27
+          .include "m103def.inc"			; include AVR port/bit definitions
+          .nolist
+          .include "definitions.asm"		; include register/constant definitions
+         ; file:	definitions.asm
+         ; copyright (c) 2000-2002 R.Holzer
+         ; 2002-01-09
+         
+         ; === definitions  ===
+          .nolist			; do not include in listing
+         
+         ; === definitions ===
+         ; Flags in status register r10
+          .equ	ALARM	= 0
+          .equ	GAME	= 1
+          .equ	CHRONO	= 2
+         
+          .equ	MAX_LEAP=30
+         ; use some registers as cache
+          .def	alarm_m	= r8
+          .def	alarm_h	= r9
+          .def	state	= r10
+          .def	N_leap	= r11
+          .def	chr_100	= r12
+          .def	chr_s	= r13
+          .def	chr_m	= r14
+          .def	chr_h	= r15
+          .def	buf_b	= r25
+         ; y points always to the byte after the last byte
+         ; of the currently shown leap
+         
+         ; date and time use the same registers,
+         ; since they are never used the same time
+         ; the function disp chrono uses them too,
+         ; since they are not used when the chrono
+         ; 
+          .def	time_s	= r5
+          .def	time_m	= r4
+          .def	time_h	= r6
+          .def	dat_dm	= r5
+          .def	dat_m	= r6
+          .def	dat_y	= r7
+          .def	dat_dw	= r4
+         
+         ; === macros ===
+          .macro	INC_BCD ;reg, lower_lim, upper_lim
+         ; increment register in BCD-mode between limits
+         ; in: reg except a0
+         ; out: same reg as input
+         ; mod: w
+          	mov	w,	@0
+          	andi	w,	0x0f
+          	cpi	w,	9	; check for BCD overflow
+          	mov	w,	@0
+          	brlo	_n10
+          	subi	w,	-6	; add 6 to pass from 0x0a to 0x10
+          _n10:	inc	w		; increment
+          	cpi	w,	(@2)+1	; check for upper limit
+          	brlo	_done
+          	ldi	w,	@1	; load with lower limit if too high
+          _done:	mov	@0,	w
+          .endmacro
+         
+          .macro	DEC_BCD	;reg, lower_lim, upper_lim
+         ; decrement register in BCD-mode between limits
+         ; register:
+         ; in: reg except a0
+         ; out: same reg as input
+         ; mod: w
+          	mov	w,	@0
+          	andi	w,	0x0f
+          	cpi	w,	1	; check for BCD underflow
+          	mov	w,	@0
+          	brge	_n10
+          	subi	w,	6	; subtract 6 to pass from 0x10 to 0x0a
+          _n10:	dec	w		; decrement
+          	cpi	w,	@1	; check for the lower limit
+          	brge	_done
+          	ldi	w,	@2	; load with upper limit if too low
+          _done:	mov	@0,	w
+          .endmacro
+         
+          .macro	BTN_BUF	;btn_reg, buffer, jump_adr
+         ; tests if new button has been pressed since last check
+         ; if true, corresponding bit is set in btn_reg
+         ; otherwise relative jump to the given adress
+         ; register:
+         ; in: btn_reg, buffer
+         ; mod: w
+          	in	@0,	BUTTON
+          	com	@0		; the buttons are active low
+          	mov	w,	@0	; save copy
+          	eor	@0,	@1	; check for actions (differences to buffer)
+          	mov	@1,	w	; safe current state to buffer
+          	and	@0,	w	; check if action was press, not release
+          	breq	@2		; branch if no btn pressed
+          .endmacro
+         
+          .macro	DIV_W4	;higher byte, lower byte
+         ; divide word by 4
+          	clc
+          	ror	@0
+          	ror	@1
+          	clc
+          	ror	@0
+          	ror	@1
+          .endmacro
+         
+          .macro	MUL_W4	;higher byte, lower byte
+         ; multiply word by 4
+          	clc
+          	rol	@1
+          	rol	@0
+          	clc
+          	rol	@1
+          	rol	@0
+          .endmacro
+         
+          .macro SHOW_BCD ; BCD_reg, extractor1, extractor2
+         ; modified: a0,a1,w
+         ; out: LCD
+          	mov	a0,	@0	; copy for first digit
+          	mov	a1,	a0	; copy for second digit
+          	swap	a0		; extract first digit
+          	andi	a0,	@1
+          	subi	a0,	-'0'	; add ASCII offset
+          	call	LCD_putc	; print first digit
+          	andi	a1,	@2	; extract second digit
+          	ldi	a0,	'0'	; add AsCII offset
+          	add	a0,	a1
+          	call	LCD_putc	; print second digit
+          .endmacro
+         
+         ; === interrupt table ===
+          .org	0
+000000 c150      	rjmp	reset
+         
+          .org	OC1Aaddr
+000018 c0fa      	rjmp	timer1_oc
+          .org	OVF2addr
+000014 c135      	rjmp	timer2_ov
+         	
+          .org	INT0addr
+000002 c0cf      	rjmp	ext_int0
+          .org	INT1addr
+000004 c0e1      	rjmp	ext_int1
+         
+          .dseg
+          .org	0x60
+000060      .byte	4*MAX_LEAP+1	; space for MAX_LEAP leaps at beginning of intern SRAM
+         
+          .cseg
+          .org	0x30
+         
+          .include "lcd.asm"
+         ; file	lcd.asm
+         ; copyright (c) 2000-2002 R.Holzer
+         ; 2002-01-19
+         ; modified by Florian Bienefelt; Beat Geissmann
+         ; 2012-05-29
+         
+         ; === definitions ===
+          .equ	LCD_IR	= 0x8000	; address LCD instruction reg
+          .equ	LCD_DR	= 0xc000	; address LCD data register
+         
+         ; === subroutines ===
+          LCD_wr_ir:
+         ; in	w (byte to write to LCD IR)
+000030 9030 8000 	lds	u, LCD_IR	; read IR to check busy flag  (bit7)
+000032   +  	JB1	u,7,LCD_wr_ir	; Jump if Bit=1 (still busy)
+000034 d003      	rcall	lcd_4us		; delay to increment DRAM addr counter
+000035 9300 8000 	sts	LCD_IR, w	; store w in IR
+000037 9508      	ret
+         	
+          lcd_4us:
+000038 d000      	rcall	lcd_2us		; recursive call		
+          lcd_2us:
+000039 0000      	nop			; rcall(3) + nop(1) + ret(4) = 8 cycles (2us)
+00003a 9508      	ret
+         
+          LCD:
+          LCD_putc:
+00003b   +  	JK	a0,CR,LCD_cr	; Jump if a0=CR
+00003d   +  	JK	a0,LF,LCD_lf	; Jump if a0=LF
+          LCD_wr_dr:
+         ; in	a0 (byte to write to LCD DR)
+00003f 9100 8000 	lds	w, LCD_IR	; read IR to check busy flag  (bit7)
+000041   +  	JB1	w,7,LCD_wr_dr	; Jump if Bit=1 (still busy)
+000043 dff4      	rcall	lcd_4us		; delay to increment DRAM addr counter
+000044 9320 c000 	sts	LCD_DR, a0	; store a0 in DR
+000046 9508      	ret
+         
+000047   +  LCD_clear:		JW	LCD_wr_ir, 0b00000001	; clear display
+000049   +  LCD_home:		JW	LCD_wr_ir, 0b00000010	; return home
+00004b   +  LCD_cursor_left:	JW	LCD_wr_ir, 0b00010000	; move cursor to left
+00004d   +  LCD_cursor_right:	JW	LCD_wr_ir, 0b00010100	; move cursor to right
+00004f   +  LCD_display_left:	JW	LCD_wr_ir, 0b00011000	; shifts display to left
+000051   +  LCD_display_right:	JW	LCD_wr_ir, 0b00011100	; shifts display to right
+000053   +  LCD_blink_on:		JW	LCD_wr_ir, 0b00001101	; Display=1,Cursor=0,Blink=1
+000055   +  LCD_blink_off:		JW	LCD_wr_ir, 0b00001100	; Display=1,Cursor=0,Blink=0
+000057   +  LCD_cursor_on:		JW	LCD_wr_ir, 0b00001110	; Display=1,Cursor=1,Blink=0
+000059   +  LCD_cursor_off:		JW	LCD_wr_ir, 0b00001100	; Display=1,Cursor=0,Blink=0
+         		
+          LCD_init:
+00005b b705      	in	w,MCUCR		; enable access to ext. SRAM
+00005c 6c00      	sbr	w,(1<<SRE)+(1<<SRW)
+00005d bf05      	out	MCUCR,w
+00005e   +  	CW	LCD_wr_ir, 0b00000001	; clear display
+000060   +  	CW	LCD_wr_ir, 0b00000110	; entry mode set (Inc=1, Shift=0)
+000062   +  	CW	LCD_wr_ir, 0b00001100	; Display=1,Cursor=0,Blink=0	
+000064   +  	CW	LCD_wr_ir, 0b00111000	; 8bits=1, 2lines=1, 5x8dots=0
+000066 9508      	ret
+         
+          LCD_pos:
+         ; in	a0 = position (0x00..0x0f first line, 0x40..0x4f second line)
+000067 2f02      	mov	w,a0
+000068 6800      	ori	w,0b10000000
+000069 cfc6      	rjmp	LCD_wr_ir
+         
+          LCD_cr:
+         ; moving the cursor to the beginning of the line (carriage return)
+00006a 9100 8000 	lds	w, LCD_IR	; read IR to check busy flag  (bit7)
+00006c   +  	JB1	w,7,LCD_cr	; Jump if Bit=1 (still busy)
+00006e 7400      	andi	w,0b01000000	; keep bit6 (begin of line 1/2)
+00006f 6800      	ori	w,0b10000000	; write address command
+000070 dfc7      	rcall	lcd_4us		; delay to increment DRAM addr counter
+000071 9300 8000 	sts	LCD_IR,w	; store in IR
+000073 9508      	ret
+         
+          LCD_lf:
+         ; moving the cursor to the beginning of the line 2 (line feed)
+000074 932f      	push	a0		; saveguard a0
+000075 e420      	ldi	a0,$40		; load position $40 (begin of line 2)
+000076 dff0      	rcall	LCD_pos		; set cursor position
+000077 912f      	pop	a0		; restore a0
+000078 9508      	ret
+         
+          LCD_puts:
+         ; put string following to call to display
+         ; in: STACK
+         ; out: display
+         ; mod: z,a0,r0,w
+         	; get address of constant string
+000079 91ff      	pop	zh
+00007a 91ef      	pop	zl
+00007b 1fee      	rol	zl	; multiply by 2 (word adr. 2 byte adr.)
+00007c 1fff      	rol	zh
+         	; put char after char until 0 read
+00007d 95c8      pts_lp:	lpm
+00007e 9631      	adiw	zl,	0x01
+00007f 2000      	tst	r0
+000080 f019      	breq	LCD_puts_end
+000081 2d20      	mov	a0,	r0
+000082 dfb8      	rcall	LCD_putc
+000083 cff9      	rjmp	pts_lp
+         	
+          LCD_puts_end:
+         	; divide z by 2 (byte adress to word adress)
+000084 95f7      	ror	zh
+000085 95e7      	ror	zl
+000086 93ef      	push	zl
+000087 93ff      	push	zh
+000088 9508      	ret          .include "calendar.asm"
+         ; file	calendar.asm
+         ; Florian Bienefelt; Beat Geissmann
+         ; 2012-05-27
+         
+         ; === definitions ===
+          .equ	PORT_CAL= PORTB
+          .equ	DDR_CAL	= DDRB
+          .equ	PIN_CAL	= PINB
+          .equ	CE	= 0
+          .equ	C_CLK	= 1
+          .equ	C_DATA	= 2
+         
+         ; === macros ===
+          .macro	WRI_CAL	;adress, value
+         ; writes immediate to specific adress in calendar
+         ; register:
+         ; mod: a0
+          	cli			; disable interrupts (timing)
+          	sbi	PORT_CAL, CE	; start communication
+          	ldi	a0,	@0	; write adress
+          	call	cal_putb
+          	ldi	a0,	@1	; write data
+          	call	cal_putb
+          	cbi	PORT_CAL, CE	; stop communication
+          	sei			; reenable interrupts
+          .endmacro
+         
+          .macro	WR_CAL	;adress, value (reg except a0)
+         ; writes register to specific adress in calendar
+         ; register:
+         ; in: reg except a0
+         ; mod: a0
+          	cli			; disable interrupts (timing)
+          	sbi	PORT_CAL, CE	; start communication
+          	ldi	a0,	@0	; write adress
+          	call	cal_putb
+          	mov	a0,	@1	; write data
+          	call	cal_putb
+          	cbi	PORT_CAL, CE	; stop communication
+          	sei
+          .endmacro
+         
+          .macro	RD_CAL 	;adress
+         ; reads byte at specific adress in calendar
+         ; register:
+         ; out: a0
+          	cli			; disable interrupts (timing)
+          	sbi	PORT_CAL, CE	; start communication
+          	ldi	a0,	@0	; write adress
+          	call	cal_putb
+          	call	cal_getb	; read, result in a0
+          	cbi	PORT_CAL, CE	; stop communication
+          	sei
+          .endmacro
+         
+         ; === subroutines ===
+          calendar_init:
+         	; enable ports
+000089   +  	OUTI	DDR_CAL, (1<<CE)+(1<<C_CLK)
+         
+         	; clear write protection
+00008b   +  	WRI_CAL	0x8e,	0x00	
+         
+         	; clear halt_clock if set
+         	; (MSB in sec register)
+         	; keep value of seconds
+000095   +  	RD_CAL	0x81
+00009e 772f      	andi	a0,	0x7f
+00009f 2f02      	mov	w,	a0
+0000a0   +  	WR_CAL	0x80,	w
+         
+         	; enable tickle charge (1 diode; 8kOhm)
+0000aa   +  	WRI_CAL	0x90,	0b10100110
+0000b4 9508      	ret
+         
+          cal_putb:
+         ; serial communication to calendar
+         ; in: a0 (modified)
+0000b5 9aba      	sbi	DDR_CAL, C_DATA		; bidir. data pin as output
+0000b6 9408      	sec				; set carry to detect end
+0000b7 9527      pc_lp:	ror	a0			; rotate LSB to carry -> shift out
+0000b8   +  	C2P	PORT_CAL, C_DATA	; write carry to PIN
+0000bc 9ac1      	sbi	PORT_CAL, C_CLK		; clock->high
+0000bd 0000      	nop				;   '
+0000be 0000      	nop				;   '
+0000bf 0000      	nop				;   '
+0000c0 98c1      	cbi	PORT_CAL, C_CLK		; clock->low
+0000c1 9488      	clc				
+0000c2 3021      	cpi	a0,1			; finish if MSB has been sent
+0000c3 f799      	brne	pc_lp
+0000c4 9508      	ret
+         
+          cal_getb:
+         ; serial communication from calendar
+         ; out: a0
+0000c5 98ba      	cbi	DDR_CAL, C_DATA		; bidir. data pin as input
+0000c6 e820      	ldi	a0,0x80			; load a0 to detect end of transmission
+0000c7 9ac1      gc_lp:	sbi	PORT_CAL, C_CLK		; clock->high
+0000c8   +  	P2C	PIN_CAL, C_DATA		; put received bit to carry
+0000cc 0000      	nop
+0000cd 0000      	nop
+0000ce 98c1      	cbi	PORT_CAL, C_CLK		; clock->low
+0000cf 9527      	ror	a0			; shift in carry
+0000d0 f7b0      	brcc	gc_lp			; detect end of transmission (carry set)
+0000d1 9508      	ret         
+         ; === interrupt service routines ===
+          ext_int0:
+         ; btn start/stop of chrono
+         ; in: buf_b, state, BUTTON
+         ; out: TCCR1B, state, buf_b
+         ; mod: _w, _u, _sreg
+0000d2 b61f      	in	_sreg,	SREG		; save SREG in r1
+0000d3 2f10      	mov	_w,	w		; safe working register in r17 (used in macros)
+0000d4   +  	BTN_BUF	_u,	buf_b,	i0_end	; detect falling edge on (active low) btn0
+0000db fe20      	sbrs	_u,	0
+0000dc c006      	rjmp	i0_end
+         	
+0000dd b42e      	in	_u,	TCCR1B		; start / stop timer1
+0000de e001      	ldi	w,	1
+0000df 2620      	eor	_u,	w
+0000e0 bc2e      	out	TCCR1B,	_u
+0000e1 e004      	ldi	w,	(1<<CHRONO)
+0000e2 26a0      	eor	state,	w		; toggle chrono state (running/stopped)
+         	
+0000e3 2f01      i0_end:	mov	w,	_w
+0000e4 be1f      	out	SREG,	_sreg
+0000e5 9518      	reti
+         
+          ext_int1:
+         ; btn leap/reset of chrono
+         ; copies current chrono time to memory if chrono is running,
+         ; otherwise the chrono is reseted
+         ; the interrupt might be interrupted
+         ; in: buf_b, state, BUTTON, N_leap, chr_100, chr_s, chr_m, chr_h
+         ; out: y, N_leap, SRAM
+         ; mod but not used: _sreg
+         ; used nut not mod: w,u
+0000e6 b61f      	in	_sreg,	SREG		; push SREG, w and u on stack
+0000e7 921f      	push	_sreg
+0000e8 930f      	push	w
+0000e9 923f      	push	u
+0000ea   +  	OUTI	EIMSK,	0b00000001	; disable this interrupt
+0000ec 9478      	sei				; reenable interrupts (long interrupt handling)
+0000ed   +  	BTN_BUF	u,	buf_b,	i1_end	; detect falling edge on (active low) btn1
+0000f4 fe31      	sbrs	u,	1
+0000f5 c015      	rjmp	i1_end
+0000f6 fea2      	sbrs	state,	CHRONO		; add leap if chrono running
+0000f7 c011      	rjmp	ch_res			; reset leaps if chrono halted
+         	
+0000f8 e10e      	ldi	w,	MAX_LEAP	; only save leap if still memory left
+0000f9 16b0      	cp	N_leap,	w
+0000fa f480      	brsh	i1_end
+0000fb 94b3      	inc	N_leap			; inc number of leaps and calculate adress
+0000fc 2c3b      	mov	u,	N_leap		; of its place in memory
+0000fd e6c0      	ldi	yl,	low(0x60)
+0000fe e0d0      	ldi	yh,	high(0x60)
+0000ff 0c33      	lsl	u
+000100 0c33      	lsl	u
+000101 0dc3      	add	yl,	u
+000102 f408      	brcc	PC+2
+000103 95d3      	inc	yh
+000104 92c9      	st	y+,	chr_100
+000105 92d9      	st	y+,	chr_s
+000106 92e9      	st	y+,	chr_m
+000107 92f9      	st	y+,	chr_h
+         
+000108 c002      	rjmp	i1_end
+         	
+000109 24bb      ch_res:	clr	N_leap
+00010a d072      	rcall	chrono_reset
+00010b 94f8      i1_end:	cli				; disable interrupts for recreating the environment
+00010c   +  	OUTI	EIMSK,	0b00000011	; reenable this interrupt
+00010e 903f      	pop	u
+00010f 910f      	pop	w
+000110 901f      	pop	_sreg
+000111 be1f      	out	SREG,	_sreg
+000112 9518      	reti
+         
+          timer1_oc:
+         ; increment chrono time by cs
+         ; max val: 99h59m59s99cs
+000113 b61f      	in	_sreg,	SREG		; safe processor state in r1
+000114 2f10      	mov	_w,	w		; safe working register in r2 (used in macros)
+000115   +  	INC_BCD	chr_100, 0x00,	0x99	; increment counter
+000120 20cc      	tst	chr_100			; detect ofervlow (reg is clear)
+000121 f529      	brne	t1_end
+000122   +  	INC_BCD	chr_s,	0x00,	0x59
+00012d 20dd      	tst	chr_s
+00012e f4c1      	brne	t1_end
+00012f   +  	INC_BCD	chr_m,	0x00,	0x59
+00013a 20ee      	tst	chr_m
+00013b f459      	brne	t1_end
+00013c   +  	INC_BCD	chr_h,	0x00,	0x99
+000147 2f01      t1_end:	mov	w,	_w
+000148 be1f      	out	SREG,	_sreg
+000149 9518      	reti
+         
+          timer2_ov:
+         	; toggle SPEAKER -> make sound (~1kHz)
+00014a b61f      	in	_sreg,	SREG
+         	
+00014b b023      	in	_u,	PORTE
+00014c e014      	ldi	_w,	(1<<SPEAKER)
+00014d 2621      	eor	_u,	_w
+00014e b823      	out	PORTE,	_u
+         	
+00014f be1f      	out	SREG,	_sreg
+000150 9518      	reti
+         
+         ; === initialisation (reset) ===
+          reset:	
+000151   +  	LDSP	RAMEND			; Load Stack Pointer (SP)
+         
+000155 24aa      	clr	state			; clear alarm/chrono state
+         	
+000156 940e 0089 	call	calendar_init
+000158 940e 005b 	call	LCD_init
+00015a 940e 017d 	call	chrono_reset
+00015c 940e 0166 	call	alarm_init
+00015e 940e 0172 	call	timer_init
+         
+000160   +  	OUTI	TIMSK,	(1<<OCIE1A)	; enable chrono timer interrupt
+000162 9478      	sei				; enable global interrupts
+         	
+000163 9a12      	sbi	DDRE,	SPEAKER		; make speaker output
+         
+000164 940c 0287 	jmp	mode_clk
+         
+         ; === subroutines ===
+          alarm_init:
+         ; clear minutes
+         ; initialize avec current hour
+000166 2488      	clr	alarm_m
+000167   +  	RD_CAL	0x85
+000170 2e92      	mov	alarm_h, a0
+000171 9508      	ret
+         
+          timer_init:
+         	; timer1
+000172   +  	OUTI	TCCR1A,	0x00		; disconnect timer1 from output
+000174   +  	OUTI	TCCR1B,	(1<<CTC1)	; CSxx=0 timer1 not started yet	CTC1=1
+000176   +  	OUTI	OCR1AH,	high(clock/100)	; fill compare register, high byte first
+000178   +  	OUTI	OCR1AL,	low(clock/100)	; 100 interrupts per second
+         	; timer2
+00017a   +  	OUTI	TCCR2,	2		; CSxx=2 CK/8
+00017c 9508      	ret
+         
+          chrono_reset:
+00017d 24bb      	clr	N_leap
+00017e 24cc      	clr	chr_100
+00017f 24dd      	clr	chr_s
+000180 24ee      	clr	chr_m
+000181 24ff      	clr	chr_h
+000182 9508      	ret
+         ; use the same two macros but with different borders and registers
+         ; use functions because skip command does not skip a whole macro
+000183   +  incs:	INC_BCD	time_s,	0x00,	0x59
+00018e 9508      	ret
+00018f   +  decs:	DEC_BCD	time_s,	0x00,	0x59
+00019a 9508      	ret
+00019b   +  incmin:	INC_BCD	time_m,	0x00,	0x59
+0001a6 9508      	ret
+0001a7   +  decmin:	DEC_BCD	time_m,	0x00,	0x59
+0001b2 9508      	ret
+         
+0001b3   +  incm_a:	INC_BCD	alarm_m, 0x00,	0x59
+0001be 9508      	ret
+0001bf   +  decm_a:	DEC_BCD	alarm_m, 0x00,	0x59
+0001ca 9508      	ret
+         
+0001cb   +  incdm:	INC_BCD	dat_dm,	0x01,	0x31
+0001d6 9508      	ret
+0001d7   +  decdm:	DEC_BCD	dat_dm,	0x01,	0x31
+0001e2 9508      	ret
+0001e3   +  incm:	INC_BCD	dat_m,	0x01,	0x12
+0001ee 9508      	ret
+0001ef   +  decm:	DEC_BCD	dat_m,	0x01,	0x12
+0001fa 9508      	ret
+0001fb   +  incy:	INC_BCD	dat_y,	0x00,	0x99
+000206 9508      	ret
+000207   +  decy:	DEC_BCD	dat_y,	0x00,	0x99
+000212 9508      	ret
+000213   +  incdw:	INC_BCD	dat_dw,	0x01,	0x07
+00021e 9508      	ret
+         
+         ; to inc / dec the hour, 24h mode is used
+         ; so if the register is in 12h, it's toggled to
+         ; 24h and then toggled back
+00021f 2744      inch_a:	clr	a2
+000220 fe97      	sbrs	alarm_h, 7		; if 12h, change to 24h
+000221 c005      	rjmp	iha_1
+000222 ef4f      	ser	a2			; r2=0xff if mode changed
+000223 2d29      	mov	a0,	alarm_h
+000224 940e 06c9 	call	swp_h
+000226 2e92      	mov	alarm_h, a0
+000227   +  iha_1:	INC_BCD	alarm_h, 0x00,	0x23	; inc in 24h mode
+000232 ff40      	sbrs	a2,	0		; test if changed
+000233 9508      	ret
+000234 2d29      	mov	a0,	alarm_h
+000235 940e 06c9 	call	swp_h
+000237 2e92      	mov	alarm_h, a0		; change back if changed
+000238 9508      	ret
+         
+000239 2744      dech_a:	clr	a2
+00023a fe97      	sbrs	alarm_h, 7
+00023b c005      	rjmp	dha_1
+00023c ef4f      	ser	a2
+00023d 2d29      	mov	a0,	alarm_h
+00023e 940e 06c9 	call	swp_h
+000240 2e92      	mov	alarm_h, a0
+000241   +  dha_1:	DEC_BCD	alarm_h, 0x00,	0x23
+00024c ff40      	sbrs	a2,	0
+00024d 9508      	ret
+00024e 2d29      	mov	a0,	alarm_h
+00024f 940e 06c9 	call	swp_h
+000251 2e92      	mov	alarm_h, a0
+000252 9508      	ret
+         	
+000253 2744      inch:	clr	a2
+000254 fe67      	sbrs	time_h,	7
+000255 c005      	rjmp	ih_1
+000256 ef4f      	ser	a2
+000257 2d26      	mov	a0,	time_h
+000258 940e 06c9 	call	swp_h
+00025a 2e62      	mov	time_h,	a0
+00025b   +  ih_1:	INC_BCD	time_h,	0x00,	0x23
+000266 ff40      	sbrs	a2,	0
+000267 9508      	ret
+000268 2d26      	mov	a0,	time_h
+000269 940e 06c9 	call	swp_h
+00026b 2e62      	mov	time_h,	a0
+00026c 9508      	ret
+         
+00026d 2744      dech:	clr	a2
+00026e fe67      	sbrs	time_h,	7
+00026f c005      	rjmp	dh_1
+000270 ef4f      	ser	a2
+000271 2d26      	mov	a0,	time_h
+000272 940e 06c9 	call	swp_h
+000274 2e62      	mov	time_h,	a0
+000275   +  dh_1:	DEC_BCD	time_h,	0x00,	0x23
+000280 ff40      	sbrs	a2,	0
+000281 9508      	ret
+000282 2d26      	mov	a0,	time_h
+000283 940e 06c9 	call	swp_h
+000285 2e62      	mov	time_h,	a0
+000286 9508      	ret
+         
+         ;main structure
+         ;uC stays in one of the modes
+         ;jump to the other modes if corresponding btn is pressed (polling)
+         
+         ;in mode_clk if time and alarm correspond, the alarm function is called
+         ;it is not possible to go back to any other state while alarm is ringing
+         
+          mode_clk:
+         ;standard time mode, shows time and date
+         ;verifies alarm, lets user switch on and off the alarm
+         ;polling for the buttons
+000287 940e 0047 	call	LCD_clear
+000289 940e 0049 	call	LCD_home
+00028b 940e 0655 	call	disp_show_time_io
+00028d 940e 0074 	call	LCD_lf
+00028f 940e 05ed 	call	disp_show_date_io
+         	
+         	;verify if alarm on or off
+000291 fca0      	sbrc	state,	0
+000292 c005      	rjmp	on
+         	
+000293 dde5      	rcall 	LCD_puts
+          .db	" Off",0,0
+000294 4f20
+000295 6666
+000296 0000
+000297 c005      	rjmp	off
+          on:
+000298 dde0      	rcall 	LCD_puts
+          .db	"  On",0,0
+000299 2020
+00029a 6e4f
+00029b 0000
+00029c d1e8      	rcall	verify_alarm
+          off:	
+         	; display blurs without wait
+00029d   +  	WAIT_MS	30
+         	
+         	; check butons (polling)
+0002b0   +  	BTN_BUF	r0,	buf_b,	mode_clk
+         
+0002b7 fc00      	sbrc	r0,	0
+0002b8 c00b      	rjmp	mode_ch_clk
+         	
+0002b9 fc01      	sbrc	r0,	1
+0002ba 940e 06ad 	call	swp_1224
+         
+0002bc e001      	ldi	w,	(1<<ALARM)
+0002bd fc02      	sbrc	r0,	2
+0002be 26a0      	eor	state,	w
+         	
+0002bf fc05      	sbrc	r0,	5
+0002c0 c14e      	rjmp	mode_ch_alarm
+         	
+0002c1 fc06      	sbrc	r0,	6
+0002c2 c116      	rjmp	mode_chrono
+         
+0002c3 cfc3      	rjmp	mode_clk
+         
+          mode_ch_clk:
+         ; mode to change time, followed by mode to change date
+         	; read current time to cache registers
+0002c4   +  	RD_CAL	0x85
+0002cd 2e62      	mov	time_h,	a0
+0002ce   +  	RD_CAL	0x83
+0002d7 2e42      	mov	time_m,	a0
+0002d8   +  	RD_CAL	0x81
+0002e1 2e52      	mov	time_s,	a0
+         
+         	; show cached time and short "mode d'emploi"
+0002e2 940e 0047 ch_clk:	call	LCD_clear
+0002e4 940e 0049 	call	LCD_home
+0002e6 940e 0673 	call	disp_show_time_reg
+0002e8 940e 0074 	call	LCD_lf
+0002ea 940e 0079 	call	LCD_puts
+          .db	"h+/-m+/-s+/-24dt",0,0
+0002ec 2b68
+0002ed 2d2f
+0002ee 2b6d
+0002ef 2d2f
+0002f0 2b73
+0002f1 2d2f
+0002f2 3432
+0002f3 7464
+0002f4 0000
+         
+0002f5   +  	WAIT_MS	30			; avoid display blur
+         	
+         	; check butons (polling)
+000308   +  	BTN_BUF	r0,	buf_b,	ch_clk
+         
+00030f fc01      	sbrc	r0,	1
+000310 940e 06ad 	call	swp_1224
+         
+000312 fc02      	sbrc	r0,	2
+000313 940e 018f 	call	decs
+000315 fc03      	sbrc	r0,	3
+000316 940e 0183 	call	incs
+000318 fc04      	sbrc	r0,	4
+000319 940e 01a7 	call	decmin
+00031b fc05      	sbrc	r0,	5
+00031c 940e 019b 	call	incmin
+00031e fc06      	sbrc	r0,	6
+00031f 940e 026d 	call	dech
+000321 fc07      	sbrc	r0,	7
+000322 940e 0253 	call	inch
+         	
+000324 fe00      	sbrs	r0,	0
+000325 cfbc      	rjmp	ch_clk
+         
+         	; write cached time back to calendar
+000326   +  	WR_CAL	0x84,	time_h
+000330   +  	WR_CAL	0x82,	time_m
+00033a   +  	WR_CAL	0x80,	time_s
+         
+          mode_ch_dat:
+         ; mode to change date
+         	; read current date to cache registers
+000344   +  	RD_CAL	0x8b
+00034d 2e42      	mov	dat_dw,	a0
+00034e   +  	RD_CAL	0x87
+000357 2e52      	mov	dat_dm, a0
+000358   +  	RD_CAL	0x89
+000361 2e62      	mov	dat_m,	a0
+000362   +  	RD_CAL	0x8d
+00036b 2e72      	mov	dat_y,	a0
+         	; show cached date and short buton description
+00036c 940e 0047 ch_dat:	call	LCD_clear
+00036e 940e 0049 	call	LCD_home
+000370 940e 0615 	call	disp_show_date_reg
+000372 940e 0074 	call	LCD_lf
+000374 940e 0079 	call	LCD_puts
+          .db	"d+/-m+/-y+/-dwck",0,0
+000376 2b64
+000377 2d2f
+000378 2b6d
+000379 2d2f
+00037a 2b79
+00037b 2d2f
+00037c 7764
+00037d 6b63
+00037e 0000
+00037f   +  	WAIT_MS	30			;avoid display blur
+         	
+         	; check butons (polling)
+000392   +  	BTN_BUF	r0,	buf_b,	ch_dat
+         	
+000399 fc01      	sbrc	r0,	1
+00039a 940e 0213 	call	incdw
+00039c fc02      	sbrc	r0,	2
+00039d 940e 0207 	call	decy
+00039f fc03      	sbrc	r0,	3
+0003a0 940e 01fb 	call	incy
+0003a2 fc04      	sbrc	r0,	4
+0003a3 940e 01ef 	call	decm
+0003a5 fc05      	sbrc	r0,	5
+0003a6 940e 01e3 	call	incm
+0003a8 fc06      	sbrc	r0,	6
+0003a9 940e 01d7 	call	decdm
+0003ab fc07      	sbrc	r0,	7
+0003ac 940e 01cb 	call	incdm
+         
+         
+0003ae fe00      	sbrs	r0,	0
+0003af cfbc      	rjmp	ch_dat
+         	
+         	; write cached date back to calendar
+0003b0   +  	WR_CAL	0x8a,	dat_dw
+0003ba   +  	WR_CAL	0x86,	dat_dm
+0003c4   +  	WR_CAL	0x88,	dat_m
+0003ce   +  	WR_CAL	0x8c,	dat_y
+         
+0003d8 ceae      	rjmp	mode_clk
+         
+          mode_chrono:
+         ; chrono mode, stop and leap btns are checked by interrupts
+         ; shows current chrono-time and leap, scrolling in leaps possible
+         ; chrono continues if mode is changed
+         
+         	; Enable extern interrupts (buton start/stop and leap/reset
+0003d9   +  	OUTI	EIMSK,	0b00000011
+         
+          chrono_lp:
+         	; display leaps (if any) and current chrono
+0003db 940e 0047 	call	LCD_clear
+0003dd 940e 0049 	call	LCD_home
+0003df 940e 0586 	call	disp_show_leap
+0003e1 940e 0074 	call	LCD_lf
+0003e3 940e 05a1 	call	disp_show_chrono_r
+         	
+0003e5   +  	WAIT_MS	30			; avoid display blur
+         	
+         	; check butons except leap/reset and start/stop by polling
+0003f8   +  	BTN_BUF	r0,	buf_b,	chrono_lp
+         
+0003ff fc07      	sbrc	r0,	7
+000400 c009      	rjmp	goto_clk
+000401 fc05      	sbrc	r0,	5
+000402 c00a      	rjmp	goto_ch_alarm
+         	
+000403 fc02      	sbrc	r0,	2
+000404 940e 0575 	call	chrono_dec_leap
+000406 fc03      	sbrc	r0,	3
+000407 940e 0561 	call	chrono_inc_leap
+         	
+000409 cfd1      	rjmp	chrono_lp
+         
+          goto_clk:
+00040a   +  	OUTI	EIMSK,	0x00		; Disable extern interrupts
+00040c ce7a      	rjmp	mode_clk
+         
+          goto_ch_alarm:
+00040d   +  	OUTI	EIMSK,	0x00		; Disable extern interrupts
+         
+          mode_ch_alarm:
+         ; mode to change the alarm
+         	; display current alarm time, 
+00040f 940e 0047 	call	LCD_clear
+000411 940e 0049 	call	LCD_home
+000413 940e 045a 	call	disp_show_alarm_reg
+         
+         	; display if game mode on or off
+000415 fea1      	sbrs	state,	GAME
+000416 c005      	rjmp	g_off
+000417 940e 0079 	call	LCD_puts
+          .db	" game",0
+000419 6720
+00041a 6d61
+00041b 0065
+          g_off:
+00041c 940e 0074 	call	LCD_lf
+00041e 940e 0079 	call	LCD_puts
+          .db	" h+/-m+/- 124jeu",0,0
+000420 6820
+000421 2f2b
+000422 6d2d
+000423 2f2b
+000424 202d
+000425 3231
+000426 6a34
+000427 7565
+000428 0000
+         
+000429   +  	WAIT_MS	30			; avoid disp blur
+         	
+         	; check butons by polling
+00043c   +  	BTN_BUF	r0,	buf_b,	mode_ch_alarm
+         	
+000443 e002      	ldi	w,	(1<<GAME)	; toggle game in state register
+000444 fc00      	sbrc	r0,	0
+000445 26a0      	eor	state,	w
+000446 fc01      	sbrc	r0,	1
+000447 940e 06ad 	call	swp_1224
+         
+000449 fc02      	sbrc	r0,	2
+00044a 940e 01bf 	call	decm_a
+00044c fc03      	sbrc	r0,	3
+00044d 940e 01b3 	call	incm_a
+00044f fc04      	sbrc	r0,	4
+000450 940e 0239 	call	dech_a
+000452 fc05      	sbrc	r0,	5
+000453 940e 021f 	call	inch_a
+         
+000455 fc06      	sbrc	r0,	6
+000456 cf82      	rjmp	mode_chrono
+000457 fc07      	sbrc	r0,	7
+000458 ce2e      	rjmp	mode_clk
+         
+000459 cfb5      	rjmp	mode_ch_alarm
+         
+         
+          disp_show_alarm_reg:
+         ; shows the content of the alarm registers
+         ; in: alarm_h, alarm_m
+         ; out: on display
+         ; mod:	a0,a1,w
+         	;hours
+00045a 2d29      	mov	a0,	alarm_h	; in BCD format
+00045b 2f32      	mov	a1,	a0	; make copy for second digit
+00045c 9522      	swap	a0		; extract first digit
+00045d 7023      	andi	a0,	0x03
+00045e fc97      	sbrc	alarm_h, 7	; if 12h mode must be lower/equal 1
+00045f 7021      	andi	a0,	0x01
+000460 5d20      	subi	a0,	-'0'	; add ASCII offset
+000461 940e 003b 	call	LCD_putc	; print first digit
+000463 703f      	andi	a1,	0x0f	; extract second digit
+000464 e320      	ldi	a0,	'0'	; add ASCII offset
+000465 0f23      	add	a0,	a1
+000466 940e 003b 	call	LCD_putc	; print second digit
+000468 e32a      	ldi	a0,	':'	; print separator
+000469 940e 003b 	call	LCD_putc
+         	
+         	;minutes
+00046b   +  	SHOW_BCD alarm_m,0x07,0x0f
+         	
+         	; write "!A/PM"(bit5) if 12/!24(bit7)
+000477 fe97      	sbrs	alarm_h, 7
+000478 9508      	ret
+         
+000479 e220      	ldi	a0,	' '	; print separator
+00047a 940e 003b 	call	LCD_putc
+00047c e421      	ldi	a0,	'A'	; load A, overwrite with P if bit5 (!AM/PM) set
+00047d fc95      	sbrc	alarm_h, 5
+00047e e520      	ldi	a0,	'P'
+00047f 940e 003b 	call	LCD_putc
+000481 e42d      	ldi	a0,	'M'	; print second char
+000482 940e 003b 	call	LCD_putc
+000484 9508      	ret	
+         
+         
+          verify_alarm:
+         ; reads and compares time in calendar with alarm time
+         ; calls alarm routine if equal, return otherwise
+000485   +  	RD_CAL	0x85
+00048e 2e62      	mov	time_h,	a0
+00048f   +  	RD_CAL	0x83
+000498 2e42      	mov	time_m,	a0
+000499   +  	RD_CAL	0x81
+0004a2 2e52      	mov	time_s,	a0
+         	
+         	
+0004a3 faa0      	bst	state,	0	;verify if alarm on
+0004a4 f456      	brtc	no_alarm
+         
+0004a5 2055      	tst	time_s		;verify if sec == 0
+0004a6 f441      	brne	no_alarm
+         	
+0004a7 1069      	cpse	time_h,	alarm_h	;verify if hours == alarm
+0004a8 c006      	rjmp	no_alarm
+         	
+0004a9 1048      	cpse	time_m,	alarm_m	;verify if minutes == alarm
+0004aa c004      	rjmp	no_alarm
+         	
+0004ab 2788      	clr	r24
+0004ac 2777      	clr	r23		;initialize mode_alarm
+0004ad e041      	ldi	r20,	1
+         	
+0004ae d001      	rcall 	mode_alarm
+         	
+          no_alarm:	
+0004af 9508      	ret
+         
+          mode_alarm:
+         ; called if alarm occured
+         ; enables timer2 interrupt (SPEAKER)
+         ; clears LCD and jumps to game/easymode
+0004b0 b707      	in	w,	TIMSK		;enable timer2 interrupt (speaker)
+0004b1 6400      	ori	w,	(1<<TOIE2)
+0004b2 bf07      	out	TIMSK,	w
+         
+0004b3 940e 0047 	call	LCD_clear
+0004b5 940e 0049 	call	LCD_home
+         
+0004b7 fca1      	sbrc	state,	GAME
+0004b8 c014      	rjmp	_alarm
+         	
+          easymode:
+         ; print nice message
+         ; waits for any buton to be pressed
+         ; disables timer2 interrupt and returns
+         
+0004b9 940e 0079 	call	LCD_puts
+          .db	"     ALARM!!!",0
+0004bb 2020
+0004bc 2020
+0004bd 4120
+0004be 414c
+0004bf 4d52
+0004c0 2121
+0004c1 0021
+         
+0004c2   +  easylp:	BTN_BUF	r0,	buf_b,	easylp	; wait for any button to be pressed
+         	
+0004c9 b707      	in	w,	TIMSK		; disable timer2 interrupt (speaker)
+0004ca 7b0f      	andi	w,	~(1<<TOIE2)
+0004cb bf07      	out	TIMSK,	w
+0004cc 9508      	ret
+         
+          _alarm:	
+0004cd 9543      	inc	r20
+0004ce 3048      	cpi	r20,	8
+0004cf f409      	brne	PC+2
+0004d0 2744      	clr	r20
+         	
+0004d1 9583      	inc	r24		;game over mechanism
+0004d2   +  	WAIT_MS	4
+0004e5 3f8f      	cpi	r24,	0xff
+0004e6 f501      	brne	game_continue
+0004e7 940e 0047 	call	LCD_clear
+0004e9 940e 0049 	call	LCD_home
+0004eb db8d      	rcall 	LCD_puts
+          .db	"Try Again",0
+0004ec 7254
+0004ed 2079
+0004ee 6741
+0004ef 6961
+0004f0 006e
+0004f1   +  	WAIT_MS	1000
+000504 2788      	clr	r24
+000505 2777      	clr	r23
+000506 9468      	SET
+         		
+          game_continue:		
+000507 3070      	cpi	r23,	0	;1st button
+000508 f4a1      	brne	_b1
+000509 f49e      	brtc	_b1
+00050a 2f54      	mov	r21,	r20
+00050b e061      	ldi	r22,	1
+00050c 940e 0047 	call	LCD_clear
+00050e 940e 0049 	call	LCD_home
+000510 db68      	rcall 	LCD_puts
+          .db	"Press Button ",0	
+000511 7250
+000512 7365
+000513 2073
+000514 7542
+000515 7474
+000516 6e6f
+000517 0020
+000518 e320      	ldi	a0,	'0'
+000519 0f25      	add	a0,	r21
+00051a 940e 003b 	call	LCD_putc
+00051c 94e8      	CLT		
+         	
+00051d 3071      _b1:	cpi	r23,	1	;2nd button
+00051e f4a1      	brne	_b2
+00051f f49e      	brtc	_b2
+000520 2f54      	mov	r21,	r20
+000521 e061      	ldi	r22,	1
+000522 940e 0047 	call	LCD_clear
+000524 940e 0049 	call	LCD_home
+000526 db52      	rcall 	LCD_puts
+          .db	"Press Button ",0	
+000527 7250
+000528 7365
+000529 2073
+00052a 7542
+00052b 7474
+00052c 6e6f
+00052d 0020
+00052e e320      	ldi	a0,	'0'
+00052f 0f25      	add	a0,	r21
+000530 940e 003b 	call	LCD_putc
+000532 94e8      	CLT
+         	
+000533 3072      _b2:	cpi	r23,	2	;3rd button
+000534 f4a1      	brne	_b3
+000535 f49e      	brtc	_b3
+000536 2f54      	mov	r21,	r20
+000537 e061      	ldi	r22,	1
+000538 940e 0047 	call	LCD_clear
+00053a 940e 0049 	call	LCD_home
+00053c db3c      	rcall 	LCD_puts
+          .db	"Press Button ",0	
+00053d 7250
+00053e 7365
+00053f 2073
+000540 7542
+000541 7474
+000542 6e6f
+000543 0020
+000544 e320      	ldi	a0,	'0'
+000545 0f25      	add	a0,	r21
+000546 940e 003b 	call	LCD_putc
+000548 94e8      	CLT
+         
+          _b3:	
+         
+000549 2355      loop:	tst	r21
+00054a f019      	breq	PC+4
+00054b 0f66      	lsl	r22
+00054c 955a      	dec	r21
+00054d cffb      	rjmp	loop
+         	
+00054e   +  	BTN_BUF	r0,	buf_b,	alarm_loop
+         	
+000555 1606      	cp	r0,	r22	;test if correct button pressed
+000556 f419      	brne	PC+4
+000557 9573      	inc	r23
+000558 2788      	clr	r24
+000559 9468      	SET			;set T flag	
+         
+00055a 3073      	cpi	r23,	3	;end condition
+00055b f421      	brne	alarm_loop
+         
+00055c b707      	in	w,	TIMSK		;disable timer2 interrupt (speaker)
+00055d 7b0f      	andi	w,	~(1<<TOIE2)
+00055e bf07      	out	TIMSK,	w
+00055f 9508      	ret
+         	
+000560 cf6c      alarm_loop:	rjmp 	_alarm	;relative jump out of range
+         
+          chrono_inc_leap:
+         ; y points to the end of the current shown value
+         ; subtract offset and divide by length(4 bytes)
+         ; inc within 0 and the number of leaps (N_leap)
+         ; add offset and multiply by 4
+000561   +  	DIV_W4	yh,	yl
+000567 9769      	sbiw	yl,	0x19
+000568 15cb      	cp	yl,	N_leap
+000569 f444      	brge	cil
+00056a 966a      	adiw	yl,	0x1a
+00056b   +  	MUL_W4	yh,	yl
+000571 9508      	ret
+         
+000572 e6c8      cil:	ldi	yl,	low(0x68)
+000573 e0d0      	ldi	yh,	high(0x68)
+000574 9508      	ret
+         
+          chrono_dec_leap:
+         ; y points to the end of the current shown value
+         ; divide  by length of 1 leap (4 bytes)
+         ; dec within 0 and the number of leaps (N_leap)
+         ; multiply by length
+000575   +  	DIV_W4	yh,	yl	; divide word by 4
+00057b 31cb      	cpi	yl,	0x1b	; detect lower limit (ofset)
+00057c f408      	brsh	cdl
+00057d 0dcb      	add	yl,	N_leap
+         	
+00057e 95ca      cdl:	dec	yl
+00057f   +  	MUL_W4	yh,	yl
+000585 9508      	ret
+         
+          disp_show_leap:
+         ; gets leap before place where y points from SRAM
+         ; returns immediately if there is no leap to show
+         ; otherwise print leap (calls disp_show_chrono)
+         ; and the number of the leap
+         ; in: y, N_leap, SRAM
+         ; mod: r4,r5,r6,r7,w,a0,a1
+         ; out: LCD
+000586 904a      	ld	r4,	-y		; load safed leap in registers
+000587 905a      	ld	r5,	-y
+000588 906a      	ld	r6,	-y
+000589 907a      	ld	r7,	-y
+00058a 9624      	adiw	yl,	4
+         
+         	; only print leap if there is one
+00058b 20bb      	tst	N_leap			
+00058c f099      	breq	disp_sl_end
+00058d d017      	rcall	disp_show_chrono
+         	
+         	; show number of leap
+00058e e220      	ldi	a0,	' '
+00058f daab      	rcall	LCD_putc
+000590 2f3c      	mov	a1,	yl		; load ptr and divide by size (4)
+000591 9488      	clc
+000592 9537      	ror	a1
+000593 9537      	ror	a1
+000594 5139      	subi	a1,	0x19		; substract offset
+000595 e320      	ldi	a0,	'0'		; load char offset
+000596 303a      dsl_1:	cpi	a1,	10		; substract 10 (increment char)
+000597 f018      	brlo	dsl_2			; until lower than ten
+000598 9523      	inc	a0
+000599 503a      	subi	a1,	10
+00059a cffb      	rjmp	dsl_1
+00059b da9f      dsl_2:	rcall	LCD_putc		; print first char
+00059c 2f23      	mov	a0,	a1
+00059d 702f      	andi	a0,	0x0f
+00059e 5d20      	subi	a0,	-'0'
+00059f da9b      	rcall	LCD_putc		; print 2nd char
+          disp_sl_end:
+0005a0 9508      	ret
+         
+          disp_show_chrono_r:
+         ; print chrono time on LCD
+         ; in: chr_h, chr_m, chr_s, chr_100
+         ; mod: r4,r5,r6,r7,w,a0,a1
+         ; out: LCD
+0005a1 2c4f      	mov	r4,	chr_h	
+0005a2 2c5e      	mov	r5,	chr_m
+0005a3 2c6d      	mov	r6,	chr_s
+0005a4 2c7c      	mov	r7,	chr_100
+         
+          disp_show_chrono:
+         ; print chrono time on LCD
+         ; in: r4,r5,r6,r7
+         ; mod: r4,r5,r6,r7,w,a0,a1
+         ; out: LCD
+         	;hours
+0005a5   +  	SHOW_BCD r4,0x0f,0x0f
+0005b1 e32a      	ldi	a0,	':'
+0005b2 940e 003b 	call	LCD_putc
+         	;min
+0005b4   +  	SHOW_BCD r5,0x07,0x0f
+0005c0 e32a      	ldi	a0,	':'
+0005c1 940e 003b 	call	LCD_putc
+         	;seconds
+0005c3   +  	SHOW_BCD r6,0x07,0x0f
+0005cf e32a      	ldi	a0,	':'
+0005d0 940e 003b 	call	LCD_putc
+         	;1/100 seconds
+0005d2   +  	SHOW_BCD r7,0x0f,0x0f
+0005de 9508      	ret
+         
+          week_tb:
+          .db	"MON",0
+0005df 4f4d
+0005e0 004e
+          .db	"TUE",0
+0005e1 5554
+0005e2 0045
+          .db	"WED",0
+0005e3 4557
+0005e4 0044
+          .db	"THU",0
+0005e5 4854
+0005e6 0055
+          .db	"FRI",0
+0005e7 5246
+0005e8 0049
+          .db	"SAT",0
+0005e9 4153
+0005ea 0054
+          .db	"SUN",0
+0005eb 5553
+0005ec 004e
+         
+          disp_show_date_io:
+         ; read date from calendar and show on LCD
+         ; in: CALENDAR
+         ; out: LCD
+         ; mod: a0,a1,w,z,dat_dw,dat_dm,dat_m,dat_y
+0005ed   +  	RD_CAL	0x8b
+0005f6 2e42      	mov	dat_dw,	a0
+0005f7   +  	RD_CAL	0x87
+000600 2e52      	mov	dat_dm,	a0
+000601   +  	RD_CAL	0x89
+00060a 2e62      	mov	dat_m,	a0
+00060b   +  	RD_CAL	0x8d
+000614 2e72      	mov	dat_y,	a0
+         
+          disp_show_date_reg:
+         ; show date in calendar registers and on LCD
+         ; in: dat_dw,dat_dm,dat_m,dat_y
+         ; out: LCD
+         ; mod: a0,a1,w,z
+         
+         	;day of week (lookup table)
+000615 2d24      	mov	a0,	dat_dw
+000616 7027      	andi	a0,	0x07
+000617 0f22      	lsl	a0
+000618 0f22      	lsl	a0
+000619 ebea      	ldi	zl,	low(week_tb*2-4)
+00061a e0fb      	ldi	zh,	high(week_tb*2-4)
+00061b 0fe2      	add	zl,	a0
+00061c 2722      	clr	a0
+00061d 1ff2      	adc	zh,	a0
+00061e e032      	ldi	a1,	2
+00061f 95c8      lp_dr:	lpm			;check for overflow!!!
+000620 2d20      	mov	a0,	r0
+000621 940e 003b 	call	LCD_putc
+000623 95e3      	inc	zl
+000624 953a      	dec	a1
+000625 f7cc      	brge	lp_dr
+         	
+000626 e220      	ldi	a0,	' '
+000627 940e 003b 	call	LCD_putc
+         	
+         	
+         	;day of month
+000629 2d25      	mov	a0,	dat_dm
+00062a   +  	SHOW_BCD dat_dm,0x03,0x0f
+000636 e22e      	ldi	a0,	'.'
+000637 940e 003b 	call	LCD_putc
+         	
+         
+         	;month
+000639   +  	SHOW_BCD dat_m,0x01,0x0f
+000645 e22e      	ldi	a0,	'.'
+000646 940e 003b 	call	LCD_putc
+         	
+         	;year
+000648   +  	SHOW_BCD dat_y,0x0f,0x0f
+000654 9508      	ret
+         
+          disp_show_time_io:
+         ; read time from calendar and show on LCD
+         ; in: CALENDAR
+         ; out: LCD
+         ; mod: a0,a1,w,time_h,time_m,time_s
+000655   +  	RD_CAL	0x85
+00065e 2e62      	mov	time_h,	a0
+00065f   +  	RD_CAL	0x83
+000668 2e42      	mov	time_m,	a0
+000669   +  	RD_CAL	0x81
+000672 2e52      	mov	time_s,	a0
+         
+          disp_show_time_reg:
+         ; show time in time registers on LCD
+         ; in: time_h, time_m, time_s
+         ; out: LCD
+         ; mod: a0,a1,w
+         	;hours
+000673 2d26      	mov	a0,	time_h	; in BCD format
+000674 2f32      	mov	a1,	a0	; make copy for second digit
+000675 9522      	swap	a0		; extract first digit
+000676 7023      	andi	a0,	0x03
+000677 fc67      	sbrc	time_h,	7	; if 12h mode must be lower/equal 1
+000678 7021      	andi	a0,	0x01
+000679 5d20      	subi	a0,	-'0'	; add ASCII offset
+00067a 940e 003b 	call	LCD_putc	; print first digit
+00067c 703f      	andi	a1,	0x0f	; extract second digit
+00067d e320      	ldi	a0,	'0'	; add ASCII offset
+00067e 0f23      	add	a0,	a1
+00067f 940e 003b 	call	LCD_putc	; print second digit
+000681 e32a      	ldi	a0,	':'	; print separator
+000682 940e 003b 	call	LCD_putc
+         	
+         	;minutes
+000684   +  	SHOW_BCD time_m,0x07,0x0f
+000690 e32a      	ldi	a0,	':'
+000691 940e 003b 	call	LCD_putc
+         	
+         	;seconds
+000693   +  	SHOW_BCD time_s,0x07,0x0f
+         	
+         	; write "!A/PM"(bit5) if 12/!24(bit7)
+00069f fe67      	sbrs	time_h,	7
+0006a0 9508      	ret
+         
+0006a1 e220      	ldi	a0,	' '	; print separator
+0006a2 940e 003b 	call	LCD_putc
+0006a4 e421      	ldi	a0,	'A'	; load A, overwrite with P if bit5 (!AM/PM) set
+0006a5 fc65      	sbrc	time_h,	5
+0006a6 e520      	ldi	a0,	'P'
+0006a7 940e 003b 	call	LCD_putc
+0006a9 e42d      	ldi	a0,	'M'	; print second char
+0006aa 940e 003b 	call	LCD_putc
+0006ac 9508      	ret
+         
+          swp_1224:
+         ; swap every time register used for hours 12->24/24->12
+         ; so that user can swap the mode at once for alarm and time
+         ;  in: CALENDAR, alarm_h, time_h
+         ; out: CALENDAR, alarm_h, time_h
+         ; mod: a0, w
+         	; swap calendrier
+0006ad   +  	RD_CAL	0x85
+0006b6 d012      	rcall	swp_h;
+0006b7 2f02      	mov	w,	a0
+0006b8   +  	WR_CAL	0x84,	w
+         	
+         	; swap alarm
+0006c2 2d29      	mov	a0,	alarm_h
+0006c3 d005      	rcall	swp_h
+0006c4 2e92      	mov	alarm_h, a0
+         	
+         	; swap intern
+0006c5 2d26      	mov	a0,	time_h
+0006c6 d002      	rcall	swp_h
+0006c7 2e62      	mov	time_h,	a0
+0006c8 9508      	ret
+         	
+          swp_h:
+         ; swaps the time in a0 from 12h to 24h mode and inverse
+         ; in: a0
+         ; out: a0
+         ; mod: w
+         	; detect mode
+0006c9 fd27      	sbrc	a0,	7
+0006ca c014      	rjmp	swp12_2_24	
+         	
+0006cb 2322      	tst	a0
+0006cc f081      	breq	AM_12
+0006cd 3122      	cpi	a0,	0x12
+0006ce f059      	breq	PM_12
+0006cf 3123      	cpi	a0,	0x13
+0006d0 f41c      	brge	PM_13
+         
+         	; 24 to 12
+         
+         	; before PM
+         	; change mode to 12hAM, time unaffected
+0006d1 2f02      	mov	w,	a0
+0006d2 6800      	ori	w,	(1<<7)
+0006d3 c01d      	rjmp	end_swap
+         	
+         	; after 13h
+         	; substract 12h (BCD-mode)
+         	; change mode to 12hPM
+0006d4 5122      PM_13:	subi	a0,	0x12
+0006d5 2f02      	mov	w,	a0
+0006d6 700f      	andi	w,	0x0F
+0006d7 300a      	cpi	w,	10
+0006d8 f008      	brlo	PC+2
+0006d9 5026      	subi	a0,	0x06
+         	; special case 12PM
+0006da 2f02      PM_12:	mov	w,	a0
+0006db 6a00      	ori	w,	(1<<7)+(1<<5)
+0006dc c014      	rjmp	end_swap
+         	
+         	; special case 12AM
+0006dd e902      AM_12:	ldi	w,	(1<<7)+0x12
+0006de c012      	rjmp	end_swap
+         
+         	; 12 to 24
+          swp12_2_24:
+0006df 732f      	andi	a0,	0x3F	; clear 12h mode bit
+0006e0 2f02      	mov	w,	a0
+0006e1 3122      	cpi	a0,	0x12	; midnight?
+0006e2 f059      	breq	_00
+0006e3 3322      	cpi	a0,	0x32	; noon?
+0006e4 f059      	breq	_12
+0006e5 ff25      	sbrs	a0,	5	; afternoon?
+         	; change mode to 24h, time unaffected
+0006e6 c00a      	rjmp	end_swap
+         	
+         	; recalculate time for 24h mode (add 12h)
+0006e7 502e      	subi	a0,	0x0E
+0006e8 2f02      	mov	w,	a0
+0006e9 702f      	andi	a0,	0x0F
+0006ea 302a      	cpi	a0,	0x0A
+0006eb f008      	brlo	PC+2
+0006ec 5f0a      	subi	w,	-0x06
+0006ed c003      	rjmp	end_swap
+         	
+         	; special case 00
+0006ee 2700      _00:	clr	w
+0006ef c001      	rjmp	end_swap
+         	; special case 12
+0006f0 e102      _12:	ldi	w,	0x12
+         
+         	; new value in w
+          end_swap:
+0006f1 2f20      	mov	a0,	w
+0006f2 9508      	ret
+Assembly complete with no errors.
